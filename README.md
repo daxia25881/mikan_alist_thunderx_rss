@@ -38,19 +38,16 @@ cd mikan_alist_thunderx_rss
 ALIST_USERNAME=你的Alist用户名
 ALIST_PASSWORD=你的Alist密码
 ALIST_BASE_URL=你的Alist地址，例如http://localhost:5244
-ALIST_OFFLINE_DOWNLOAD_DIR=/你的Alist下载目录
+ALIST_OFFLINE_DOWNLOAD_DIR=/你的Alist下载目录，例如/thunderx
 
 # Mikan RSS URLs (多个链接用逗号分隔)
-MIKAN_RSS_URLS=https://mikanani.me/RSS/MyBangumi?token=你的token,https://mikanani.me/RSS/Bangumi?bangumiId=xxxx
-
-# 或者使用单个RSS链接(上面的配置优先)
-# MIKAN_RSS_URL=https://mikanani.me/RSS/MyBangumi?token=你的token
+MIKAN_RSS_URLS=https://mikanani.me/RSS/Bangumi?bangumiId=xxx&subgroupid=xxx,https://mikanani.me/RSS/Bangumi?bangumiId=xxx&subgroupid=xxx
 
 # 检查设置
-CHECK_INTERVAL=10    # RSS 检查间隔（分钟）
+CHECK_INTERVAL=5    # RSS 检查间隔（分钟）
 
 # Web界面设置
-WEB_PORT=8080        # Web界面端口
+WEB_PORT=8085        # Web界面端口
 
 # 时区设置 (可选但推荐)
 TZ=Asia/Shanghai
@@ -70,7 +67,7 @@ docker-compose up -d
 
 5. 访问Web管理界面
 
-在浏览器中访问 `http://你的服务器IP:8080`，可以看到Web管理界面。
+在浏览器中访问 `http://你的服务器IP:8085`，可以看到Web管理界面。
 
 6. 查看日志
 
