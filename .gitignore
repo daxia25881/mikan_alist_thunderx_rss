@@ -1,0 +1,15 @@
+# Environment variables
+.env
+
+# Data directory
+/data/
+
+# Binaries
+mikan_alist_uploader
+
+# IDE files
+.idea/
+.vscode/
+
+# Logs
+*.log 

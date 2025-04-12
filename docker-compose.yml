@@ -1,0 +1,24 @@
+version: '3'
+
+services:
+  mikan-alist-uploader:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mikan-alist-uploader
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data
+    env_file:
+      - .env
+    environment:
+      - TZ=${TZ:-Asia/Shanghai}
+      - WEB_PORT=8085
+    ports:
+      - "8085:8085"
+    networks:
+      - mikan_network
+
+networks:
+  mikan_network:
+    driver: bridge 
