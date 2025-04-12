@@ -25,8 +25,8 @@ Mikan to Alist Uploader 是一个自动化工具，用于监听 Mikan RSS 的更
 1. 克隆或下载此仓库到本地
 
 ```bash
-git clone https://github.com/yourusername/mikan_alist_uploader.git
-cd mikan_alist_uploader
+git clone https://github.com/daxia25881/mikan_alist_thunderx_rss.git
+cd mikan_alist_thunderx_rss
 ```
 
 2. 配置环境变量
