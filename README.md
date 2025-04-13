@@ -11,6 +11,7 @@ Mikan to Alist Uploader 是一个自动化工具，用于监听 Mikan RSS 的更
 - 按番剧分类存储下载记录
 - 通过 Docker 快速部署
 - 提供Web管理界面，可视化配置和监控
+- 支持实时修改配置并立即生效
 
 ## Docker Compose 部署指南
 
@@ -25,8 +26,8 @@ Mikan to Alist Uploader 是一个自动化工具，用于监听 Mikan RSS 的更
 1. 克隆或下载此仓库到本地
 
 ```bash
-git clone https://github.com/daxia25881/mikan_alist_thunderx_rss.git
-cd mikan_alist_thunderx_rss
+git clone https://github.com/daxia25881/mikan_alist_uploader.git
+cd mikan_alist_uploader
 ```
 
 2. 配置环境变量
@@ -105,15 +106,16 @@ docker-compose up -d --build
 
 1. 应用启动后，会轮询检查配置的所有 RSS 链接
 2. 从 RSS 标题中提取番剧名称（例如 "Mikan Project - 乡下大叔成为剑圣" 提取为 "乡下大叔成为剑圣"）
-3. 在 Alist 下载目录中创建以番剧名称命名的文件夹
+3. 在 Alist 下载目录中创建以番剧名称命名的文件夹（自动检查文件夹是否已存在）
 4. 从 RSS 项目中提取磁力链接，添加到对应的番剧文件夹中
 5. 将下载记录按番剧分类保存到 data/processed_mikan_hashes.json 文件中
-6. 定期按配置的 CHECK_INTERVAL 间隔检查 RSS 更新
+6. 定期按配置的 CHECK_INTERVAL 间隔检查 RSS 更新，或通过Web界面手动触发检查
 
 ## 重要提示
 
-- 确保您的 Alist 配置了正确的离线下载引擎（如 storage 或 aria2）
-- 如果使用 aria2 作为下载引擎，请确保 aria2 已正确配置
+- 确保您的 Alist 配置了正确的离线下载引擎（使用默认的内置存储引擎）
+- 默认使用 storage 作为下载引擎，无需额外配置 aria2
 - 建议在首次使用前，手动测试一次 Alist 的离线下载功能是否正常工作
 - 多个磁力链接上传会间隔 3 秒，以避免 Alist API 限流
-- 默认Web端口为8080，可以通过环境变量或配置文件修改 
+- 默认Web端口为8085，可以通过环境变量或配置文件修改
+- 应用会自动监控下载状态并在添加新任务后检查进度 
