@@ -21,13 +21,13 @@ import (
 
 // Config 定义 Alist/服务 配置结构体
 type Config struct {
-	Username           string   `json:"username"`
-	Password           string   `json:"password"`
-	BaseURL            string   `json:"base_url"`             // Alist 或类似服务的 API 基础 URL
-	OfflineDownloadDir string   `json:"offline_download_dir"` // Alist 上的离线下载目标目录
-	CheckInterval      int      `json:"check_interval"`       // RSS 检查间隔（分钟）
-	RssURLs            []string `json:"rss_urls"`             // 多个Mikan RSS URL
-	WebPort            int      `json:"web_port"`             // Web界面端口
+	Username           string            `json:"username"`
+	Password           string            `json:"password"`
+	BaseURL            string            `json:"base_url"`             // Alist 或类似服务的 API 基础 URL
+	OfflineDownloadDir string            `json:"offline_download_dir"` // Alist 上的离线下载目标目录
+	CheckInterval      int               `json:"check_interval"`       // RSS 检查间隔（分钟）
+	RssURLs            map[string]string `json:"rss_urls"`             // 多个Mikan RSS URL及对应的自定义文件夹名
+	WebPort            int               `json:"web_port"`             // Web界面端口
 }
 
 // RSS represents the top-level structure of the Mikan RSS feed
@@ -60,6 +60,8 @@ type ProcessedHashesMap map[string][]string
 // --- Global Variables ---
 var config Config                // Holds Alist configuration
 var globalToken string           // Cache for Alist API token
+var tokenExpiry time.Time        // When the token expires
+var tokenMutex sync.RWMutex      // Mutex for token operations
 var configMutex sync.RWMutex     // 用于保护配置的读写锁
 var isConfigChanged bool = false // 配置是否已更改
 var mikanRssURL string           // Holds the Mikan RSS URL
@@ -72,6 +74,7 @@ const (
 	defaultCheckInterval = 30                                 // 默认检查间隔（分钟）
 	uploadInterval       = 3 * time.Second                    // 多个磁力链接上传间隔时间
 	defaultWebPort       = 8085                               // 默认Web界面端口
+	tokenLifetime        = 2 * time.Hour                      // 令牌默认有效期（根据Alist配置可能不同）
 )
 
 // Common public trackers (for magnet link generation)
@@ -100,6 +103,11 @@ func loadConfig() error {
 	config.BaseURL = strings.TrimRight(os.Getenv("ALIST_BASE_URL"), "/") // Ensure no trailing slash
 	config.OfflineDownloadDir = os.Getenv("ALIST_OFFLINE_DOWNLOAD_DIR")
 
+	// 初始化RssURLs映射
+	if config.RssURLs == nil {
+		config.RssURLs = make(map[string]string)
+	}
+
 	// 获取间隔配置
 	if interval := os.Getenv("CHECK_INTERVAL"); interval != "" {
 		if i, err := strconv.Atoi(interval); err == nil && i > 0 {
@@ -126,6 +134,23 @@ func loadConfig() error {
 
 	// Check if loaded from environment variables
 	loadedFromEnv := config.Username != "" && config.Password != "" && config.BaseURL != "" && config.OfflineDownloadDir != ""
+
+	// 优先尝试从配置文件加载RSS URLs，无论环境变量是否存在
+	loadedRssFromFile := false
+	file, err := os.Open(configFileName)
+	if err == nil {
+		defer file.Close()
+
+		decoder := json.NewDecoder(file)
+		var fileConfig Config
+		err = decoder.Decode(&fileConfig)
+		if err == nil && len(fileConfig.RssURLs) > 0 {
+			// 从文件加载 RSS URLs
+			config.RssURLs = fileConfig.RssURLs
+			loadedRssFromFile = true
+			log.Printf("从配置文件 %s 加载了 %d 个RSS链接", configFileName, len(config.RssURLs))
+		}
+	}
 
 	if !loadedFromEnv {
 		log.Printf("环境变量未完全设置，尝试从 %s 加载...", configFileName)
@@ -171,7 +196,8 @@ func loadConfig() error {
 			if config.OfflineDownloadDir == "" {
 				config.OfflineDownloadDir = fileConfig.OfflineDownloadDir
 			}
-			if len(config.RssURLs) == 0 && len(fileConfig.RssURLs) > 0 {
+			// 如果前面没有加载到RSS URLs，这里再次尝试加载
+			if !loadedRssFromFile && len(fileConfig.RssURLs) > 0 {
 				config.RssURLs = fileConfig.RssURLs
 			}
 			if config.CheckInterval <= 0 && fileConfig.CheckInterval > 0 {
@@ -194,6 +220,8 @@ func loadConfig() error {
 	// 不再要求RSS链接预先配置，允许通过Web界面添加
 	if len(config.RssURLs) == 0 {
 		log.Printf("未配置任何Mikan RSS链接，请通过 http://localhost:%d 添加", config.WebPort)
+	} else {
+		log.Printf("当前配置了 %d 个RSS链接", len(config.RssURLs))
 	}
 
 	log.Printf("已配置: %d 个RSS链接, RSS检查间隔=%d分钟, Web端口=%d",
@@ -232,7 +260,7 @@ func saveConfig() error {
 }
 
 // updateConfig 更新配置并保存
-func updateConfig(offlineDir string, checkInterval int, rssURLs []string) error {
+func updateConfig(offlineDir string, checkInterval int, rssURLs map[string]string) error {
 	configMutex.Lock()
 
 	// 标记配置是否有变化
@@ -252,17 +280,9 @@ func updateConfig(offlineDir string, checkInterval int, rssURLs []string) error 
 
 	// 更新RSS URLs
 	if rssURLs != nil && len(rssURLs) > 0 {
-		// 清理空值
-		cleanURLs := make([]string, 0, len(rssURLs))
-		for _, url := range rssURLs {
-			if trimmedURL := strings.TrimSpace(url); trimmedURL != "" {
-				cleanURLs = append(cleanURLs, trimmedURL)
-			}
-		}
-
 		// 检查是否有变化
-		if !stringSlicesEqual(cleanURLs, config.RssURLs) {
-			config.RssURLs = cleanURLs
+		if !stringSlicesEqual(rssURLs, config.RssURLs) {
+			config.RssURLs = rssURLs
 			changed = true
 		}
 	}
@@ -279,13 +299,13 @@ func updateConfig(offlineDir string, checkInterval int, rssURLs []string) error 
 }
 
 // stringSlicesEqual 比较两个字符串切片是否相等
-func stringSlicesEqual(a, b []string) bool {
+func stringSlicesEqual(a, b map[string]string) bool {
 	if len(a) != len(b) {
 		return false
 	}
 
-	for i, v := range a {
-		if v != b[i] {
+	for k, v := range a {
+		if b[k] != v {
 			return false
 		}
 	}
@@ -298,9 +318,20 @@ func stringSlicesEqual(a, b []string) bool {
 // getToken retrieves the Alist API token, using a cache if available.
 // Handles login if the token is not cached or seems invalid.
 func getToken() (string, error) {
-	if globalToken != "" {
-		// Simple cache check. A more robust solution might verify the token first.
-		// log.Println("使用缓存的 Alist token")
+	tokenMutex.RLock()
+	// Check if we have a valid token that hasn't expired
+	if globalToken != "" && time.Now().Before(tokenExpiry) {
+		defer tokenMutex.RUnlock()
+		return globalToken, nil
+	}
+	tokenMutex.RUnlock()
+
+	// Need to get a new token
+	tokenMutex.Lock()
+	defer tokenMutex.Unlock()
+
+	// Double-check in case another goroutine refreshed the token while we were waiting
+	if globalToken != "" && time.Now().Before(tokenExpiry) {
 		return globalToken, nil
 	}
 
@@ -376,7 +407,8 @@ func getToken() (string, error) {
 	}
 
 	log.Println("Alist 登录成功，已获取并缓存 token。")
-	globalToken = token // Cache the token
+	globalToken = token                         // Cache the token
+	tokenExpiry = time.Now().Add(tokenLifetime) // Set expiration time
 	return token, nil
 }
 
@@ -789,9 +821,9 @@ func checkAllRSS() (bool, error) {
 	anyNewItems := false
 
 	// 2. 遍历所有RSS链接
-	for _, rssURL := range config.RssURLs {
+	for rssURL, customFolderName := range config.RssURLs {
 		// 处理一个RSS链接
-		hasNewItems, err := processSingleRSS(rssURL, processedHashes)
+		hasNewItems, err := processSingleRSS(rssURL, customFolderName, processedHashes)
 		if err != nil {
 			log.Printf("处理RSS链接 %s 时出错: %v", rssURL, err)
 			continue // 继续处理下一个RSS
@@ -814,7 +846,7 @@ func checkAllRSS() (bool, error) {
 }
 
 // processSingleRSS 处理单个RSS链接的内容
-func processSingleRSS(rssURL string, processedHashes ProcessedHashesMap) (bool, error) {
+func processSingleRSS(rssURL string, customFolderName string, processedHashes ProcessedHashesMap) (bool, error) {
 	log.Printf("处理RSS链接: %s", rssURL)
 
 	// 1. 获取并解析RSS
@@ -828,29 +860,37 @@ func processSingleRSS(rssURL string, processedHashes ProcessedHashesMap) (bool, 
 		return false, nil
 	}
 
-	// 2. 从Channel Title解析番剧名称
-	animeTitle := extractAnimeTitle(feed.Channel.Title)
-	if animeTitle == "" {
-		log.Printf("无法从RSS标题提取番剧名称: %s", feed.Channel.Title)
-		animeTitle = "未知番剧_" + time.Now().Format("20060102")
+	// 2. 确定使用的文件夹名称
+	var folderName string
+	if customFolderName != "" {
+		// 使用自定义文件夹名
+		folderName = customFolderName
+		log.Printf("使用自定义文件夹名: %s", folderName)
+	} else {
+		// 从Channel Title解析番剧名称
+		folderName = extractAnimeTitle(feed.Channel.Title)
+		if folderName == "" {
+			log.Printf("无法从RSS标题提取番剧名称: %s", feed.Channel.Title)
+			folderName = "未知番剧_" + time.Now().Format("20060102")
+		}
 	}
 
-	log.Printf("处理番剧: %s", animeTitle)
+	log.Printf("处理番剧: %s", folderName)
 
 	// 3. 确保已处理哈希表中有该番剧的条目
-	if _, exists := processedHashes[animeTitle]; !exists {
-		processedHashes[animeTitle] = []string{}
+	if _, exists := processedHashes[folderName]; !exists {
+		processedHashes[folderName] = []string{}
 	}
 
 	// 4. 创建番剧文件夹
-	folderCreated, err := createAnimeFolder(animeTitle)
+	folderCreated, err := createAnimeFolder(folderName)
 	if err != nil || !folderCreated {
 		log.Printf("创建番剧文件夹失败: %v", err)
 		// 继续处理，尝试直接上传到根目录
 	}
 
 	// 5. 获取文件夹中当前文件数，用于后续监控
-	initialCount, err := getAnimeFolderFileCount(animeTitle)
+	initialCount, err := getAnimeFolderFileCount(folderName)
 	if err != nil {
 		log.Printf("获取番剧文件夹初始文件数失败: %v", err)
 		initialCount = 0
@@ -871,7 +911,7 @@ func processSingleRSS(rssURL string, processedHashes ProcessedHashesMap) (bool, 
 
 		// 检查是否已处理
 		isProcessed := false
-		for _, hash := range processedHashes[animeTitle] {
+		for _, hash := range processedHashes[folderName] {
 			if hash == itemHash {
 				isProcessed = true
 				break
@@ -901,7 +941,7 @@ func processSingleRSS(rssURL string, processedHashes ProcessedHashesMap) (bool, 
 			magnetLink := createMagnetLink(itemHash, item.Title)
 
 			// 添加磁力链接到Alist指定文件夹
-			success, addErr := addMagnet(magnetLink, animeTitle)
+			success, addErr := addMagnet(magnetLink, folderName)
 			if !success {
 				log.Printf("添加项目到Alist失败: %v", addErr)
 				continue // 继续处理下一个
@@ -910,7 +950,7 @@ func processSingleRSS(rssURL string, processedHashes ProcessedHashesMap) (bool, 
 			log.Printf("成功将磁力链接添加到Alist (哈希: %s)", itemHash)
 
 			// 将哈希添加到已处理列表
-			processedHashes[animeTitle] = append(processedHashes[animeTitle], itemHash)
+			processedHashes[folderName] = append(processedHashes[folderName], itemHash)
 
 			// 如果还有更多项目要处理，等待uploadInterval时间
 			if i < len(newItems)-1 {
@@ -921,10 +961,10 @@ func processSingleRSS(rssURL string, processedHashes ProcessedHashesMap) (bool, 
 
 		// 8. 监控下载
 		if initialCount >= 0 {
-			go monitorDownloadFolder(animeTitle, initialCount)
+			go monitorDownloadFolder(folderName, initialCount)
 		}
 	} else {
-		log.Printf("番剧 %s 没有新项目需要处理", animeTitle)
+		log.Printf("番剧 %s 没有新项目需要处理", folderName)
 	}
 
 	return hasNewItems, nil
@@ -1302,6 +1342,111 @@ func checkFolderExists(folderPath string) (bool, error) {
 	return false, nil
 }
 
+// renameAnimeFolder 重命名Alist中的番剧文件夹
+func renameAnimeFolder(oldFolderName string, newFolderName string) (bool, error) {
+	// 获取token
+	token, err := getToken()
+	if err != nil {
+		return false, fmt.Errorf("获取 Alist token 失败: %w", err)
+	}
+
+	// 构建完整路径
+	folderPath := path.Join(config.OfflineDownloadDir, oldFolderName)
+
+	// 检查文件夹是否存在
+	exists, err := checkFolderExists(folderPath)
+	if err != nil {
+		log.Printf("检查文件夹 %s 是否存在时出错: %v", folderPath, err)
+	}
+
+	if !exists {
+		log.Printf("文件夹 %s 不存在，无法重命名", folderPath)
+		return false, fmt.Errorf("文件夹不存在，无法重命名")
+	}
+
+	log.Printf("正在重命名文件夹: %s -> %s", oldFolderName, newFolderName)
+
+	// 准备请求
+	apiURL := config.BaseURL + "/api/fs/rename"
+	postData := map[string]string{
+		"path": folderPath,    // 完整路径，包括父目录和当前文件夹名
+		"name": newFolderName, // 新的文件夹名称，不包含路径
+	}
+
+	payloadBytes, err := json.Marshal(postData)
+	if err != nil {
+		log.Printf("重命名文件夹数据 JSON 编码失败: %v", err)
+		return false, fmt.Errorf("编码重命名文件夹数据失败: %w", err)
+	}
+
+	// 发送请求
+	client := &http.Client{Timeout: 15 * time.Second}
+	req, err := http.NewRequest("POST", apiURL, strings.NewReader(string(payloadBytes)))
+	if err != nil {
+		log.Printf("创建重命名文件夹请求失败: %v", err)
+		return false, fmt.Errorf("创建重命名文件夹请求失败: %w", err)
+	}
+
+	req.Header.Set("Authorization", token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", userAgent)
+
+	// 发送请求
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("重命名文件夹时网络错误: %v", err)
+		// 清除token缓存
+		globalToken = ""
+		return false, fmt.Errorf("重命名文件夹网络错误: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// 读取响应
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("读取重命名文件夹响应失败: %v", err)
+		return false, fmt.Errorf("读取重命名文件夹响应失败: %w", err)
+	}
+
+	// 检查认证错误
+	if resp.StatusCode == http.StatusUnauthorized {
+		log.Println("Alist 返回 401 Unauthorized，Token 可能已过期，清除缓存")
+		globalToken = ""
+		return false, fmt.Errorf("Alist 认证失败 (401)")
+	}
+
+	// 检查其他HTTP错误
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("重命名文件夹 API 失败，状态码: %d, 响应: %s", resp.StatusCode, string(body))
+		return false, fmt.Errorf("重命名文件夹 API 失败，状态码: %d", resp.StatusCode)
+	}
+
+	// 解析响应
+	var result map[string]interface{}
+	err = json.Unmarshal(body, &result)
+	if err != nil {
+		log.Printf("解析重命名文件夹响应 JSON 失败: %v, 响应: %s", err, string(body))
+		return false, fmt.Errorf("解析重命名文件夹响应失败: %w", err)
+	}
+
+	// 检查API错误
+	codeFloat, _ := result["code"].(float64)
+	code := int(codeFloat)
+	if code == 200 {
+		log.Printf("成功重命名文件夹: %s -> %s", oldFolderName, newFolderName)
+		return true, nil
+	}
+
+	// 处理API错误
+	message := "未知API错误"
+	if msg, ok := result["message"].(string); ok {
+		message = msg
+	}
+
+	log.Printf("重命名文件夹 API 返回错误: %s (code: %d)", message, code)
+	return false, fmt.Errorf("重命名文件夹 API 返回错误: %s", message)
+}
+
 // --- Web Interface Templates ---
 
 // 首页模板
@@ -1353,10 +1498,16 @@ const indexTemplate = `
         .rss-item {
             display: flex;
             margin-bottom: 10px;
+            align-items: center;
         }
         .rss-item input {
-            flex-grow: 1;
             margin-right: 10px;
+        }
+        .rss-item input:first-child {
+            flex: 2;
+        }
+        .rss-item input:nth-child(2) {
+            flex: 1;
         }
         .btn {
             padding: 8px 12px;
@@ -1457,9 +1608,10 @@ const indexTemplate = `
             <div class="form-group">
                 <label>RSS 链接:</label>
                 <div class="rss-list" id="rssContainer">
-                    {{range $index, $url := .Config.RssURLs}}
+                    {{range $url, $folderName := .Config.RssURLs}}
                     <div class="rss-item">
                         <input type="text" name="rssURLs[]" value="{{$url}}" placeholder="https://mikanani.me/RSS/..." required>
+                        <input type="text" name="folderNames[]" value="{{$folderName}}" placeholder="自定义文件夹名称（可选）">
                         <button type="button" class="btn btn-danger" onclick="removeRssField(this)">删除</button>
                     </div>
                     {{end}}
@@ -1505,7 +1657,7 @@ const indexTemplate = `
             const container = document.getElementById('rssContainer');
             const newItem = document.createElement('div');
             newItem.className = 'rss-item';
-            newItem.innerHTML = '<input type="text" name="rssURLs[]" placeholder="https://mikanani.me/RSS/..." required><button type="button" class="btn btn-danger" onclick="removeRssField(this)">删除</button>';
+            newItem.innerHTML = '<input type="text" name="rssURLs[]" placeholder="https://mikanani.me/RSS/..." required><input type="text" name="folderNames[]" placeholder="自定义文件夹名称（可选）"><button type="button" class="btn btn-danger" onclick="removeRssField(this)">删除</button>';
             container.appendChild(newItem);
         }
         
@@ -1595,6 +1747,27 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// getDefaultFolderName 获取RSS链接的默认文件夹名
+func getDefaultFolderName(rssURL string) (string, error) {
+	// 获取并解析RSS Feed
+	feed, err := fetchAndParseRSS(rssURL)
+	if err != nil {
+		return "", fmt.Errorf("获取RSS Feed失败: %w", err)
+	}
+
+	if feed == nil {
+		return "", fmt.Errorf("RSS Feed为空")
+	}
+
+	// 从Channel Title提取番剧名称
+	folderName := extractAnimeTitle(feed.Channel.Title)
+	if folderName == "" {
+		folderName = "未知番剧_" + time.Now().Format("20060102")
+	}
+
+	return folderName, nil
+}
+
 // 保存配置处理
 func handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 	// 仅接受POST请求
@@ -1627,20 +1800,133 @@ func handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 
 	// 获取RSS链接
 	rssURLs := r.Form["rssURLs[]"]
+	folderNames := r.Form["folderNames[]"]
+
 	if len(rssURLs) == 0 {
 		http.Redirect(w, r, "/?message=至少需要一个RSS链接&error=true", http.StatusSeeOther)
 		return
 	}
 
-	// 更新配置
-	err = updateConfig(offlineDir, checkInterval, rssURLs)
+	// 加载哈希记录，用于更新文件夹名变更
+	processedHashes, loadErr := loadProcessedHashes(processedHashesFile)
+	if loadErr != nil {
+		log.Printf("警告: 加载哈希记录失败: %v", loadErr)
+		processedHashes = make(ProcessedHashesMap)
+	}
+
+	// 保存当前的RSS URL与文件夹名映射，用于检测变化
+	configMutex.RLock()
+	oldRssMap := make(map[string]string)
+	for url, folder := range config.RssURLs {
+		oldRssMap[url] = folder
+	}
+	configMutex.RUnlock()
+
+	// 创建URL到文件夹名的映射
+	rssMap := make(map[string]string)
+	folderNameChanges := make(map[string]string) // 记录文件夹名变更: 旧名 -> 新名
+
+	// 跟踪需要获取默认文件夹名的URL
+	var urlsNeedDefaultName []string
+
+	for i, url := range rssURLs {
+		url = strings.TrimSpace(url)
+		if url == "" {
+			continue
+		}
+
+		var folderName string
+		if i < len(folderNames) {
+			folderName = strings.TrimSpace(folderNames[i])
+		}
+
+		// 如果没有指定文件夹名称，且在原配置中没有对应的文件夹名，需要获取默认文件夹名
+		if folderName == "" {
+			oldFolderName, exists := oldRssMap[url]
+			if exists && oldFolderName != "" {
+				// 使用旧配置中的文件夹名
+				folderName = oldFolderName
+			} else {
+				// 标记为需要获取默认文件夹名
+				urlsNeedDefaultName = append(urlsNeedDefaultName, url)
+				// 临时设置为空，后面会更新
+				folderName = ""
+			}
+		}
+
+		rssMap[url] = folderName
+
+		// 检查文件夹名称是否变化
+		if oldFolderName, exists := oldRssMap[url]; exists && oldFolderName != "" && folderName != "" && oldFolderName != folderName {
+			// 文件夹名称已变化，记录下来稍后处理
+			folderNameChanges[oldFolderName] = folderName
+		}
+	}
+
+	if len(rssMap) == 0 {
+		http.Redirect(w, r, "/?message=至少需要一个有效的RSS链接&error=true", http.StatusSeeOther)
+		return
+	}
+
+	// 获取默认文件夹名
+	for _, url := range urlsNeedDefaultName {
+		defaultName, err := getDefaultFolderName(url)
+		if err != nil {
+			log.Printf("警告: 无法获取RSS %s 的默认文件夹名: %v", url, err)
+			defaultName = "未知番剧_" + time.Now().Format("20060102")
+		}
+
+		// 更新映射
+		rssMap[url] = defaultName
+		log.Printf("为RSS %s 设置默认文件夹名: %s", url, defaultName)
+	}
+
+	// 先更新配置
+	err = updateConfig(offlineDir, checkInterval, rssMap)
 	if err != nil {
 		http.Redirect(w, r, fmt.Sprintf("/?message=保存配置失败: %s&error=true", err.Error()), http.StatusSeeOther)
 		return
 	}
 
+	// 处理文件夹名称变更
+	hashesUpdated := false
+	for oldName, newName := range folderNameChanges {
+		log.Printf("处理文件夹名称变更: %s -> %s", oldName, newName)
+
+		// 尝试重命名文件夹
+		success, renameErr := renameAnimeFolder(oldName, newName)
+		if !success || renameErr != nil {
+			log.Printf("重命名文件夹失败: %v", renameErr)
+			// 继续处理其他重命名，不中断流程
+		} else {
+			// 重命名成功，更新哈希记录
+			if hashes, exists := processedHashes[oldName]; exists {
+				log.Printf("更新哈希记录: %s -> %s", oldName, newName)
+				processedHashes[newName] = hashes
+				delete(processedHashes, oldName)
+				hashesUpdated = true
+			}
+		}
+	}
+
+	// 如果哈希记录有更新，保存到文件
+	if hashesUpdated {
+		if saveErr := saveProcessedHashes(processedHashesFile, processedHashes); saveErr != nil {
+			log.Printf("警告: 保存更新后的哈希记录失败: %v", saveErr)
+		} else {
+			log.Println("成功更新并保存哈希记录")
+		}
+	}
+
 	// 重定向回首页
-	http.Redirect(w, r, "/?message=配置已成功保存", http.StatusSeeOther)
+	message := "配置已成功保存"
+	if len(folderNameChanges) > 0 {
+		message += fmt.Sprintf("，已处理 %d 个文件夹名称变更", len(folderNameChanges))
+	}
+	if len(urlsNeedDefaultName) > 0 {
+		message += fmt.Sprintf("，为 %d 个RSS链接设置了默认文件夹名", len(urlsNeedDefaultName))
+	}
+	http.Redirect(w, r, "/?message="+message, http.StatusSeeOther)
 }
 
 // 立即检查处理
