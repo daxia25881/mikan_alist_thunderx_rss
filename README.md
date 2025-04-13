@@ -2,6 +2,9 @@
 
 Mikan to Alist Uploader 是一个自动化工具，用于监听 Mikan RSS 的更新，并将新发布的资源自动添加到 Alist 的离线下载队列中。
 
+![image](https://github.com/user-attachments/assets/8ca848a6-e691-4aed-ae1f-c05cee1d6d75)
+
+
 ## 功能特点
 
 - 支持监听多个 Mikan RSS 链接
@@ -40,9 +43,6 @@ ALIST_USERNAME=你的Alist用户名
 ALIST_PASSWORD=你的Alist密码
 ALIST_BASE_URL=你的Alist地址，例如http://localhost:5244
 ALIST_OFFLINE_DOWNLOAD_DIR=/你的Alist下载目录，例如/thunderx
-
-# Mikan RSS URLs (多个链接用逗号分隔)
-MIKAN_RSS_URLS=https://mikanani.me/RSS/Bangumi?bangumiId=xxx&subgroupid=xxx,https://mikanani.me/RSS/Bangumi?bangumiId=xxx&subgroupid=xxx
 
 # 检查设置
 CHECK_INTERVAL=5    # RSS 检查间隔（分钟）
