@@ -100,21 +100,6 @@ func loadConfig() error {
 	config.BaseURL = strings.TrimRight(os.Getenv("ALIST_BASE_URL"), "/") // Ensure no trailing slash
 	config.OfflineDownloadDir = os.Getenv("ALIST_OFFLINE_DOWNLOAD_DIR")
 
-	// 加载RSS URLs
-	if rssURLsEnv := os.Getenv("MIKAN_RSS_URLS"); rssURLsEnv != "" {
-		// 以逗号分隔多个URL
-		config.RssURLs = strings.Split(rssURLsEnv, ",")
-		// 清理空格
-		for i, url := range config.RssURLs {
-			config.RssURLs[i] = strings.TrimSpace(url)
-		}
-		log.Printf("从环境变量加载了 %d 个RSS链接", len(config.RssURLs))
-	} else if singleRssURL := os.Getenv("MIKAN_RSS_URL"); singleRssURL != "" {
-		// 兼容单个RSS链接的旧配置
-		config.RssURLs = []string{singleRssURL}
-		log.Println("从环境变量加载了单个RSS链接")
-	}
-
 	// 获取间隔配置
 	if interval := os.Getenv("CHECK_INTERVAL"); interval != "" {
 		if i, err := strconv.Atoi(interval); err == nil && i > 0 {
@@ -142,7 +127,7 @@ func loadConfig() error {
 	// Check if loaded from environment variables
 	loadedFromEnv := config.Username != "" && config.Password != "" && config.BaseURL != "" && config.OfflineDownloadDir != ""
 
-	if !loadedFromEnv || len(config.RssURLs) == 0 {
+	if !loadedFromEnv {
 		log.Printf("环境变量未完全设置，尝试从 %s 加载...", configFileName)
 		file, err := os.Open(configFileName)
 		if err != nil {
@@ -206,8 +191,9 @@ func loadConfig() error {
 		return fmt.Errorf("错误: Alist 配置不完整 (需要 username, password, base_url, offline_download_dir)，请检查环境变量或 %s 文件", configFileName)
 	}
 
+	// 不再要求RSS链接预先配置，允许通过Web界面添加
 	if len(config.RssURLs) == 0 {
-		return fmt.Errorf("错误: 未配置任何Mikan RSS链接，请通过MIKAN_RSS_URLS或MIKAN_RSS_URL环境变量配置")
+		log.Printf("未配置任何Mikan RSS链接，请通过 http://localhost:%d 添加", config.WebPort)
 	}
 
 	log.Printf("已配置: %d 个RSS链接, RSS检查间隔=%d分钟, Web端口=%d",
@@ -1687,12 +1673,6 @@ func main() {
 		log.Fatalf("初始化失败: Alist 配置错误: %v", err)
 	}
 
-	// 检查是否有RSS链接配置
-	if len(config.RssURLs) == 0 {
-		log.Fatalf("错误: 未配置RSS链接，请配置MIKAN_RSS_URLS或MIKAN_RSS_URL环境变量")
-	}
-	log.Printf("已配置 %d 个RSS链接", len(config.RssURLs))
-
 	// 初始化下载目录
 	_, err = listDownloadDir()
 	if err != nil {
@@ -1702,14 +1682,19 @@ func main() {
 	// 启动Web服务器
 	startWebServer()
 
-	// 立即执行一次检查，看是否有新项目
-	newItemFound, checkErr := checkAllRSS()
-	if checkErr != nil {
-		log.Printf("首次 RSS 检查错误: %v", checkErr)
-	} else if newItemFound {
-		log.Printf("首次检查发现新项目，已添加到下载队列")
+	// 只有在配置了RSS链接的情况下才执行检查
+	if len(config.RssURLs) > 0 {
+		// 立即执行一次检查，看是否有新项目
+		newItemFound, checkErr := checkAllRSS()
+		if checkErr != nil {
+			log.Printf("首次 RSS 检查错误: %v", checkErr)
+		} else if newItemFound {
+			log.Printf("首次检查发现新项目，已添加到下载队列")
+		} else {
+			log.Printf("首次检查未发现新项目")
+		}
 	} else {
-		log.Printf("首次检查未发现新项目")
+		log.Printf("未配置RSS链接，跳过首次检查。请通过 http://localhost:%d 添加RSS链接", config.WebPort)
 	}
 
 	// 主循环：定期检查 RSS
@@ -1739,6 +1724,12 @@ func main() {
 	}()
 
 	for range ticker.C {
+		// 只有在配置了RSS链接的情况下才执行检查
+		if len(config.RssURLs) == 0 {
+			log.Printf("未配置RSS链接，跳过此次检查。请通过 http://localhost:%d 添加RSS链接", config.WebPort)
+			continue
+		}
+
 		startTime := time.Now()
 		log.Printf("定时 RSS 检查开始...")
 
