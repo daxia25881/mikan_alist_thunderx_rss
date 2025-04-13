@@ -6,6 +6,8 @@
 Mikan to Alist Uploader 是一个自动化工具，用于监听 Mikan RSS 的更新，并将新发布的资源自动添加到 Alist 的离线下载队列中。
 
 ![image](https://github.com/user-attachments/assets/8ca848a6-e691-4aed-ae1f-c05cee1d6d75)
+![image](https://github.com/user-attachments/assets/12e79510-42cf-4159-bcde-10882d9353de)
+
 
 
 ## 功能特点
@@ -57,23 +59,17 @@ WEB_PORT=8085        # Web界面端口
 TZ=Asia/Shanghai
 ```
 
-3. 创建 data 目录以存储持久化数据
-
-```bash
-mkdir -p data
-```
-
-4. 构建和启动容器
+3. 构建和启动容器
 
 ```bash
 docker-compose up -d
 ```
 
-5. 访问Web管理界面
+4. 访问Web管理界面
 
 在浏览器中访问 `http://你的服务器IP:8085`，可以看到Web管理界面。
 
-6. 查看日志
+5. 查看日志
 
 ```bash
 docker-compose logs -f
