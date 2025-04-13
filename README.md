@@ -1,6 +1,6 @@
 # Mikan to Alist Uploader
 
-适配 https://github.com/ykxVK8yL5L/alist alist魔改版的thunderx网盘
+适配 https://github.com/ykxVK8yL5L/alist alist魔改版的thunderx网盘，无需消耗服务器流量，借用thunderx网盘磁力云解析功能，即传即看
 
 Mikan to Alist Uploader 是一个自动化工具，用于监听 Mikan RSS 的更新，并将新发布的资源自动添加到 Alist 的离线下载队列中。
 
