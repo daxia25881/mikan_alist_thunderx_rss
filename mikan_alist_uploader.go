@@ -28,6 +28,12 @@ type Config struct {
 	CheckInterval      int               `json:"check_interval"`       // RSS 检查间隔（分钟）
 	RssURLs            map[string]string `json:"rss_urls"`             // 多个Mikan RSS URL及对应的自定义文件夹名
 	WebPort            int               `json:"web_port"`             // Web界面端口
+	BarkKey            string            `json:"bark_key"`             // Bark推送Key
+	BarkBadge          string            `json:"bark_badge"`           // Bark通知角标
+	BarkSound          string            `json:"bark_sound"`           // Bark通知声音
+	BarkIcon           string            `json:"bark_icon"`            // Bark通知图标
+	BarkURL            string            `json:"bark_url"`             // Bark通知点击跳转链接
+	BarkEnabled        bool              `json:"bark_enabled"`         // 是否启用Bark通知
 }
 
 // RSS represents the top-level structure of the Mikan RSS feed
@@ -65,6 +71,8 @@ var tokenMutex sync.RWMutex      // Mutex for token operations
 var configMutex sync.RWMutex     // 用于保护配置的读写锁
 var isConfigChanged bool = false // 配置是否已更改
 var mikanRssURL string           // Holds the Mikan RSS URL
+// Bark API endpoint前缀
+const barkAPIPrefix = "https://api.day.app/"
 
 // --- Constants ---
 const (
@@ -131,6 +139,25 @@ func loadConfig() error {
 	if config.WebPort <= 0 {
 		config.WebPort = defaultWebPort
 	}
+
+	// 设置Bark默认值
+	if config.BarkKey == "" {
+		config.BarkKey = "" // 默认为空
+	}
+	if config.BarkBadge == "" {
+		config.BarkBadge = "1"
+	}
+	if config.BarkSound == "" {
+		config.BarkSound = "calypso"
+	}
+	if config.BarkIcon == "" {
+		// 硬编码通知图标链接
+		config.BarkIcon = "https://cdn.ldstatic.com/original/4X/3/c/7/3c7c50e129e050d3ad3673c963317bac47807f54.png"
+	}
+	if config.BarkURL == "" {
+		config.BarkURL = "infuse://"
+	}
+	// BarkEnabled默认为false，需要用户手动开启
 
 	// Check if loaded from environment variables
 	loadedFromEnv := config.Username != "" && config.Password != "" && config.BaseURL != "" && config.OfflineDownloadDir != ""
@@ -771,17 +798,15 @@ func saveProcessedHashes(filename string, hashesMap ProcessedHashesMap) error {
 }
 
 // monitorDownload 监控 Alist 下载目录中的文件数变化来判断下载是否完成
-func monitorDownload(initialCount int) {
+func monitorDownload(initialCount int) bool {
 	log.Printf("开始监控下载目录 (初始文件数: %d)...", initialCount)
 
-	lastCount := initialCount
-	checkCount := 0
+	downloadSuccess := false
 	maxChecks := 10 // 最多检查10次
 
-	for checkCount < maxChecks {
+	for checkCount := 1; checkCount <= maxChecks; checkCount++ {
 		// 等待3秒
 		time.Sleep(3 * time.Second)
-		checkCount++
 
 		// 获取当前目录文件数
 		currentCount, err := listDownloadDir()
@@ -791,20 +816,20 @@ func monitorDownload(initialCount int) {
 		}
 
 		// 计算变化量
-		change := currentCount - lastCount
-		log.Printf("监控: 检查 %d/%d, 当前文件数=%d, 上次文件数=%d, 变化=%d",
-			checkCount, maxChecks, currentCount, lastCount, change)
+		change := currentCount - initialCount
+		log.Printf("监控: 检查 %d/%d, 当前文件数=%d, 初始文件数=%d, 变化=%d",
+			checkCount, maxChecks, currentCount, initialCount, change)
 
 		// 如果文件数增加，认为有新下载完成
 		if change > 0 {
 			log.Printf("检测到新文件下载完成 (增加了 %d 个文件)", change)
+			downloadSuccess = true
+			break
 		}
-
-		// 更新上次的文件数
-		lastCount = currentCount
 	}
 
-	log.Printf("文件监控结束，已完成 %d 次检查", maxChecks)
+	log.Printf("文件监控结束，已完成最多 %d 次检查，下载成功: %v", maxChecks, downloadSuccess)
+	return downloadSuccess
 }
 
 // checkAllRSS 轮询检查所有RSS链接
@@ -889,14 +914,7 @@ func processSingleRSS(rssURL string, customFolderName string, processedHashes Pr
 		// 继续处理，尝试直接上传到根目录
 	}
 
-	// 5. 获取文件夹中当前文件数，用于后续监控
-	initialCount, err := getAnimeFolderFileCount(folderName)
-	if err != nil {
-		log.Printf("获取番剧文件夹初始文件数失败: %v", err)
-		initialCount = 0
-	}
-
-	// 6. 处理所有未处理的项目
+	// 5. 处理所有未处理的项目
 	hasNewItems := false
 	var newItems []Item
 
@@ -925,10 +943,9 @@ func processSingleRSS(rssURL string, customFolderName string, processedHashes Pr
 
 		// 收集新项目
 		newItems = append(newItems, item)
-		hasNewItems = true
 	}
 
-	// 7. 处理所有新项目
+	// 6. 处理所有新项目
 	if len(newItems) > 0 {
 		log.Printf("发现 %d 个新项目，开始处理...", len(newItems))
 
@@ -937,31 +954,77 @@ func processSingleRSS(rssURL string, customFolderName string, processedHashes Pr
 			itemHash := path.Base(item.Link)
 			log.Printf("处理新项目 %d/%d: %s", i+1, len(newItems), item.Title)
 
-			// 生成磁力链接
+			// 1. 先获取文件夹当前文件数
+			initialCount, err := getAnimeFolderFileCount(folderName)
+			if err != nil {
+				log.Printf("获取番剧文件夹初始文件数失败: %v", err)
+				initialCount = 0
+			}
+			log.Printf("上传前文件夹 %s 的文件数量: %d", folderName, initialCount)
+
+			// 2. 生成磁力链接
 			magnetLink := createMagnetLink(itemHash, item.Title)
 
-			// 添加磁力链接到Alist指定文件夹
+			// 3. 添加磁力链接到Alist指定文件夹
 			success, addErr := addMagnet(magnetLink, folderName)
 			if !success {
 				log.Printf("添加项目到Alist失败: %v", addErr)
 				continue // 继续处理下一个
 			}
 
-			log.Printf("成功将磁力链接添加到Alist (哈希: %s)", itemHash)
+			log.Printf("已将磁力链接添加到Alist (哈希: %s)，现在监控文件变化...", itemHash)
 
-			// 将哈希添加到已处理列表
-			processedHashes[folderName] = append(processedHashes[folderName], itemHash)
+			// 4. 多次检查文件变化
+			downloadSuccess := false
+			maxChecks := 10
+
+			for checkCount := 1; checkCount <= maxChecks; checkCount++ {
+				// 等待3秒
+				time.Sleep(3 * time.Second)
+
+				// 获取当前文件数
+				currentCount, err := getAnimeFolderFileCount(folderName)
+				if err != nil {
+					log.Printf("监控时获取文件夹 %s 内容错误: %v, 将继续监控", folderName, err)
+					continue
+				}
+
+				// 计算变化量
+				change := currentCount - initialCount
+				log.Printf("监控 %s: 检查 %d/%d, 当前文件数=%d, 初始文件数=%d, 变化=%d",
+					folderName, checkCount, maxChecks, currentCount, initialCount, change)
+
+				// 如果文件数增加，认为下载成功
+				if change > 0 {
+					log.Printf("检测到文件夹 %s 中有新文件 (增加了 %d 个文件)，下载成功!", folderName, change)
+					downloadSuccess = true
+					break
+				}
+			}
+
+			// 只有下载成功才记录哈希值和发送通知
+			if downloadSuccess {
+				// 将哈希添加到已处理列表
+				processedHashes[folderName] = append(processedHashes[folderName], itemHash)
+				hasNewItems = true
+
+				// 发送Bark通知
+				notifyErr := sendBarkNotification(folderName, item.Title)
+				if notifyErr != nil {
+					log.Printf("发送通知失败: %v", notifyErr)
+					// 继续处理，不因通知失败而中断流程
+				}
+
+				log.Printf("添加哈希值 %s 到已处理列表", itemHash)
+			} else {
+				log.Printf("下载可能失败，文件数未增加，不记录哈希值 %s", itemHash)
+			}
 
 			// 如果还有更多项目要处理，等待uploadInterval时间
 			if i < len(newItems)-1 {
 				log.Printf("等待 %s 后继续上传下一个项目...", uploadInterval)
 				time.Sleep(uploadInterval)
 			}
-		}
-
-		// 8. 监控下载
-		if initialCount >= 0 {
-			go monitorDownloadFolder(folderName, initialCount)
 		}
 	} else {
 		log.Printf("番剧 %s 没有新项目需要处理", folderName)
@@ -1079,7 +1142,7 @@ func getAnimeFolderFileCount(animeTitle string) (int, error) {
 }
 
 // monitorDownloadFolder 监控特定文件夹的下载变化
-func monitorDownloadFolder(animeTitle string, initialCount int) {
+func monitorDownloadFolder(animeTitle string, initialCount int) bool {
 	folderPath := animeTitle
 	if animeTitle == "" {
 		folderPath = config.OfflineDownloadDir
@@ -1089,14 +1152,12 @@ func monitorDownloadFolder(animeTitle string, initialCount int) {
 
 	log.Printf("开始监控下载文件夹 %s (初始文件数: %d)...", folderPath, initialCount)
 
-	lastCount := initialCount
-	checkCount := 0
+	downloadSuccess := false
 	maxChecks := 10 // 最多检查10次
 
-	for checkCount < maxChecks {
+	for checkCount := 1; checkCount <= maxChecks; checkCount++ {
 		// 等待3秒
 		time.Sleep(3 * time.Second)
-		checkCount++
 
 		// 获取当前文件数
 		currentCount, err := getAnimeFolderFileCount(animeTitle)
@@ -1106,20 +1167,20 @@ func monitorDownloadFolder(animeTitle string, initialCount int) {
 		}
 
 		// 计算变化量
-		change := currentCount - lastCount
-		log.Printf("监控 %s: 检查 %d/%d, 当前文件数=%d, 上次文件数=%d, 变化=%d",
-			folderPath, checkCount, maxChecks, currentCount, lastCount, change)
+		change := currentCount - initialCount
+		log.Printf("监控 %s: 检查 %d/%d, 当前文件数=%d, 初始文件数=%d, 变化=%d",
+			folderPath, checkCount, maxChecks, currentCount, initialCount, change)
 
 		// 如果文件数增加，认为有新下载完成
 		if change > 0 {
 			log.Printf("检测到文件夹 %s 中新文件下载完成 (增加了 %d 个文件)", folderPath, change)
+			downloadSuccess = true
+			break
 		}
-
-		// 更新上次文件数
-		lastCount = currentCount
 	}
 
-	log.Printf("文件夹 %s 监控结束，已完成 %d 次检查", folderPath, maxChecks)
+	log.Printf("文件夹 %s 监控结束，已完成最多 %d 次检查，下载成功: %v", folderPath, maxChecks, downloadSuccess)
+	return downloadSuccess
 }
 
 // createAnimeFolder 在Alist中创建番剧文件夹
@@ -1492,6 +1553,14 @@ const indexTemplate = `
             border-radius: 4px;
             box-sizing: border-box;
         }
+        .checkbox-group {
+            margin-bottom: 10px;
+        }
+        .checkbox-group label {
+            display: inline;
+            font-weight: normal;
+            margin-left: 5px;
+        }
         .rss-list {
             margin-top: 10px;
         }
@@ -1581,6 +1650,19 @@ const indexTemplate = `
             border-color: #f5c6cb;
             color: #721c24;
         }
+        .section-title {
+            border-bottom: 1px solid #eee;
+            padding-bottom: 10px;
+            margin-top: 20px;
+            margin-bottom: 20px;
+        }
+        /* 通过这个类控制Bark设置的显示/隐藏 */
+        .bark-config {
+            display: none;
+        }
+        .bark-config.active {
+            display: block;
+        }
     </style>
 </head>
 <body>
@@ -1595,6 +1677,7 @@ const indexTemplate = `
     <div class="container">
         <h2>配置设置</h2>
         <form action="/save-config" method="POST">
+            <h3 class="section-title">基本设置</h3>
             <div class="form-group">
                 <label for="offlineDir">下载目录:</label>
                 <input type="text" id="offlineDir" name="offlineDir" value="{{.Config.OfflineDownloadDir}}" required>
@@ -1605,8 +1688,37 @@ const indexTemplate = `
                 <input type="number" id="checkInterval" name="checkInterval" value="{{.Config.CheckInterval}}" min="1" required>
             </div>
             
+            <h3 class="section-title">Bark 推送设置</h3>
+            
+            <div class="checkbox-group">
+                <input type="checkbox" id="barkEnabled" name="barkEnabled" {{if .Config.BarkEnabled}}checked{{end}} onchange="toggleBarkConfig()">
+                <label for="barkEnabled">启用 Bark 通知</label>
+            </div>
+            
+            <div id="barkConfigSection" class="bark-config {{if .Config.BarkEnabled}}active{{end}}">
+                <div class="form-group">
+                    <label for="barkKey">Bark Key:</label>
+                    <input type="text" id="barkKey" name="barkKey" value="{{.Config.BarkKey}}" placeholder="例如：xxxxxxxxxx">
+                </div>
+                
+                <div class="form-group">
+                    <label for="barkBadge">通知角标:</label>
+                    <input type="text" id="barkBadge" name="barkBadge" value="{{.Config.BarkBadge}}" placeholder="例如：1">
+                </div>
+                
+                <div class="form-group">
+                    <label for="barkSound">通知声音:</label>
+                    <input type="text" id="barkSound" name="barkSound" value="{{.Config.BarkSound}}" placeholder="例如：calypso">
+                </div>
+                
+                <div class="form-group">
+                    <label for="barkURL">点击跳转链接:</label>
+                    <input type="text" id="barkURL" name="barkURL" value="{{.Config.BarkURL}}" placeholder="例如：infuse://">
+                </div>
+            </div>
+            
+            <h3 class="section-title">RSS 链接</h3>
             <div class="form-group">
-                <label>RSS 链接:</label>
                 <div class="rss-list" id="rssContainer">
                     {{range $url, $folderName := .Config.RssURLs}}
                     <div class="rss-item">
@@ -1653,6 +1765,17 @@ const indexTemplate = `
     </div>
     
     <script>
+        function toggleBarkConfig() {
+            const barkEnabled = document.getElementById('barkEnabled').checked;
+            const barkConfigSection = document.getElementById('barkConfigSection');
+            
+            if (barkEnabled) {
+                barkConfigSection.classList.add('active');
+            } else {
+                barkConfigSection.classList.remove('active');
+            }
+        }
+        
         function addRssField() {
             const container = document.getElementById('rssContainer');
             const newItem = document.createElement('div');
@@ -1673,6 +1796,11 @@ const indexTemplate = `
                 e.preventDefault();
                 alert('请至少添加一个RSS链接');
             }
+        });
+        
+        // 页面加载时初始化Bark配置区域显示状态
+        document.addEventListener('DOMContentLoaded', function() {
+            toggleBarkConfig();
         });
     </script>
 </body>
@@ -1798,6 +1926,14 @@ func handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 获取Bark配置
+	barkKey := r.FormValue("barkKey")
+	barkBadge := r.FormValue("barkBadge")
+	barkSound := r.FormValue("barkSound")
+	barkIcon := r.FormValue("barkIcon")
+	barkURL := r.FormValue("barkURL")
+	barkEnabled := r.FormValue("barkEnabled") == "on"
+
 	// 获取RSS链接
 	rssURLs := r.Form["rssURLs[]"]
 	folderNames := r.Form["folderNames[]"]
@@ -1881,8 +2017,21 @@ func handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		log.Printf("为RSS %s 设置默认文件夹名: %s", url, defaultName)
 	}
 
-	// 先更新配置
-	err = updateConfig(offlineDir, checkInterval, rssMap)
+	// 更新配置
+	configMutex.Lock()
+	config.OfflineDownloadDir = offlineDir
+	config.CheckInterval = checkInterval
+	config.RssURLs = rssMap
+	config.BarkKey = barkKey
+	config.BarkBadge = barkBadge
+	config.BarkSound = barkSound
+	config.BarkIcon = barkIcon
+	config.BarkURL = barkURL
+	config.BarkEnabled = barkEnabled
+	configMutex.Unlock()
+
+	// 保存配置
+	err = saveConfig()
 	if err != nil {
 		http.Redirect(w, r, fmt.Sprintf("/?message=保存配置失败: %s&error=true", err.Error()), http.StatusSeeOther)
 		return
@@ -2030,4 +2179,74 @@ func main() {
 
 		log.Printf("RSS 检查完成 (耗时: %s)，等待下一个检查周期", time.Since(startTime))
 	}
+}
+
+// sendBarkNotification sends a notification via Bark API after successful upload
+func sendBarkNotification(animeTitle string, itemTitle string) error {
+	log.Printf("发送 Bark 通知: %s - %s", animeTitle, itemTitle)
+
+	// 如果禁用了Bark通知，直接返回
+	if !config.BarkEnabled {
+		log.Printf("Bark 通知已禁用，跳过发送")
+		return nil
+	}
+
+	// Construct notification payload
+	payload := map[string]string{
+		"title": animeTitle,
+		"body":  itemTitle,
+		"badge": config.BarkBadge,
+		"sound": config.BarkSound,
+		"icon":  config.BarkIcon,
+		"group": animeTitle,
+		"url":   config.BarkURL,
+	}
+
+	// Marshal payload to JSON
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("错误: 无法编码通知数据: %v", err)
+		return fmt.Errorf("编码通知数据失败: %w", err)
+	}
+	log.Printf("Bark 发送请求: %v", payload)
+	// Print request body
+	log.Printf("Bark 通知请求体: %s", string(payloadBytes))
+
+	// 检查BarkKey是否设置
+	if config.BarkKey == "" {
+		log.Printf("错误: 未设置Bark Key")
+		return fmt.Errorf("未设置Bark Key")
+	}
+
+	// 完整API URL
+	barkURL := barkAPIPrefix + config.BarkKey
+
+	// Create HTTP request
+	client := &http.Client{Timeout: 10 * time.Second}
+	req, err := http.NewRequest("POST", barkURL, strings.NewReader(string(payloadBytes)))
+	if err != nil {
+		log.Printf("错误: 创建通知请求失败: %v", err)
+		return fmt.Errorf("创建通知请求失败: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	req.Header.Set("User-Agent", userAgent)
+
+	// Send request
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("错误: 发送通知请求时网络错误: %v", err)
+		return fmt.Errorf("发送通知时网络错误: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Check response
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		log.Printf("错误: Bark API请求失败，状态码: %d, 响应: %s", resp.StatusCode, string(bodyBytes))
+		return fmt.Errorf("Bark API请求失败: status code %d", resp.StatusCode)
+	}
+
+	log.Printf("成功发送 Bark 通知: %s - %s", animeTitle, itemTitle)
+	return nil
 }
